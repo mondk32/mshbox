@@ -114,7 +114,7 @@ code = p.wait()                # 124 on timeout; p.kill(), p.poll(), p.returncod
 ```
 
 `mshbox.run` raises `mshbox.SandboxError` if setup fails; in that case **nothing was started and nothing is left behind**.
-Extra keyword arguments: `mem_mb`, `procs`, `env`, `merge_stderr`.
+Extra keyword arguments: `mem_mb`, `procs`, `env`, `merge_stderr`, `cmdline` (a RAW command line used verbatim instead of C-runtime quoting of `argv`; needed for `cmd.exe /d /s /c <text>`, where cmd parses the text itself and `\"` is not an escape; `argv[0]` is still the executable that gets resolved and granted).
 
 ## Self-test
 

@@ -371,5 +371,26 @@ class CleanupTests(Base):
         self.assertEqual([c[1] for c in f.calls if c[0] == "remove_aces"], ["C:\\b"])
 
 
+class RawCmdlineAndAtexitTests(Base):
+    def test_raw_cmdline_is_passed_verbatim(self):
+        f = self.fake()
+        raw = 'cmd.exe /d /s /c "echo \\"hi\\" & dir"'
+        self.launch(f, argv=["cmd.exe", "/d", "/s", "/c", "x"], cmdline=raw).wait(5)
+        self.assertEqual([c for c in f.calls if c[0] == "spawn"][0][2], raw)
+
+    def test_default_cmdline_is_still_quoted(self):
+        f = self.fake()
+        self.launch(f, argv=["python", "a b.py"]).wait(5)
+        self.assertEqual([c for c in f.calls if c[0] == "spawn"][0][2], 'python "a b.py"')
+
+    def test_atexit_callback_is_removed_after_teardown(self):
+        f = self.fake()
+        with mock.patch.object(mshbox.atexit, "register") as reg, mock.patch.object(mshbox.atexit, "unregister") as unreg:
+            p = self.launch(f)
+            p.wait(5)
+        reg.assert_called_once()
+        unreg.assert_called()
+
+
 if __name__ == "__main__":
     unittest.main()

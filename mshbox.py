@@ -27,7 +27,7 @@ import threading
 import time
 import types
 
-__version__ = "0.1.0a1"
+__version__ = "0.1.0a2"
 EXIT_TIMEOUT, EXIT_SETUP, EXIT_INTERRUPT = 124, 125, 130
 
 # --- access masks (winnt.h). Deliberately NO WRITE_DAC, WRITE_OWNER or FILE_DELETE_CHILD. ---
@@ -611,7 +611,7 @@ class SandboxProcess:
         self._lock, self._done = threading.RLock(), threading.Event()
 
     # ---- startup: strictly ordered; any exception => full rollback and the command never ran ----
-    def _start(self, argv, cwd, rw, ro, net, timeout, mem_mb, procs, extra_env, merge):
+    def _start(self, argv, cwd, rw, ro, net, timeout, mem_mb, procs, extra_env, merge, cmdline=None):
         w = self.w
         cwd = norm_path(cwd)
         if not argv:
@@ -644,7 +644,7 @@ class SandboxProcess:
             w_err = w_out
             if not merge:
                 r_err, w_err = w.pipe(); self._raw_reads.append(r_err); child_side.append(w_err)
-            self.hproc, hthread, self.pid = w.spawn(exe, build_cmdline(argv), cwd, envblock, self.sid, net, (nul, w_out, w_err))
+            self.hproc, hthread, self.pid = w.spawn(exe, cmdline or build_cmdline(argv), cwd, envblock, self.sid, net, (nul, w_out, w_err))
             child_side.append(hthread)
             w.assign_and_resume(self.job, self.hproc, hthread)   # suspended until it is inside the job
         finally:
@@ -681,6 +681,7 @@ class SandboxProcess:
             if self._released:
                 return
             self._released, w, problems = True, self.w, []
+            atexit.unregister(self._release)           # a long-lived host (an agent) must not pile up one callback per command
             for h in self._raw_reads:
                 w.close(h)
             for fn, h in ((w.terminate_job, self.job), (w.terminate_process, self.hproc if self.job is None else None)):
@@ -727,11 +728,13 @@ class SandboxProcess:
 
 
 def launch(argv, cwd, rw=(), ro=(), net=False, timeout=None, mem_mb=None, procs=None, env=None,
-           merge_stderr=True, journal=None):
-    """Start argv in the sandbox or raise SandboxError (nothing is left behind, command not run)."""
+           merge_stderr=True, journal=None, cmdline=None):
+    """Start argv in the sandbox or raise SandboxError (nothing is left behind, command not run).
+    `cmdline`: optional RAW command line used verbatim instead of quoting argv with the C-runtime rules. argv[0] is still the
+    executable (resolved and granted). Needed for `cmd.exe /c <text>` where cmd parses the text itself and `\\"` is not an escape."""
     p = SandboxProcess(win32(), journal or Journal(), argv)
     try:
-        p._start(list(argv), cwd, rw, ro, net, timeout, mem_mb, procs, env, merge_stderr)
+        p._start(list(argv), cwd, rw, ro, net, timeout, mem_mb, procs, env, merge_stderr, cmdline)
     except BaseException as e:
         if p.hproc:
             try:
