@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mshbox - run ONE command inside a Windows AppContainer with restricted files and network.
 
-ALPHA, UNAUDITED, NOT YET TESTED ON REAL WINDOWS BY ITS AUTHOR. See README.md / SECURITY.md.
+ALPHA, UNAUDITED. selftest passes on one real Windows 11 machine only. See README.md / SECURITY.md.
 
 How it works (details in README):
   * a per-run AppContainer profile (no capabilities => no network; --net adds internetClient only)
@@ -11,7 +11,7 @@ How it works (details in README):
 FAIL CLOSED: any setup problem => SandboxError => exit 125 and the command is never started.
 
 Everything above the `Win32` class is pure logic and runs on any OS (unit-tested that way).
-Lines marked `# VERIFY:` are things I could not check without a Windows machine.
+Lines marked `# VERIFY:` are things not yet confirmed beyond the one tested machine.
 """
 import argparse
 import atexit

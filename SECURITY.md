@@ -2,8 +2,8 @@
 
 ## Status: alpha, unaudited
 
-mshbox is **alpha software and has not been audited** by anyone. It has not been verified on real Windows
-by its author at the time of writing (see "Needs verification on real Windows" in the README). It is a
+mshbox is **alpha software and has not been audited** by anyone. It has been verified on only one real Windows 11
+machine (selftest 7/7); other Windows versions are untested (see "Verification status" in the README). It is a
 damage-control tool for commands written by an LLM on your own machine. It is **not** a security boundary
 against malware or a determined attacker. Do not rely on it to contain hostile code.
 

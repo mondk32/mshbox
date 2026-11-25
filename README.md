@@ -4,11 +4,10 @@ Run **one command** on Windows inside a per-run [AppContainer](https://learn.mic
 with restricted filesystem and network access. No admin rights, no UAC prompt, no driver, no service,
 no firewall rule, no compiled helper, **standard-library Python only** (ctypes + Win32).
 
-> **Status: alpha, unaudited, and NOT yet run on real Windows by its author.**
-> Everything that can be tested without Windows is tested (see [Tests](#tests)); everything that touches
-> the Win32 API is written from documentation and is listed under
-> [Needs verification on real Windows](#needs-verification-on-real-windows). Run `mshbox selftest`
-> before you rely on it, and read [SECURITY.md](SECURITY.md).
+> **Status: alpha and unaudited.** The built-in `selftest` passes 7/7 on one real machine (Windows 11,
+> Python 3.14, standard non-admin user). It has **not** been tried on other Windows versions, so run
+> `mshbox selftest` on yours before you rely on it, and read [SECURITY.md](SECURITY.md). Items still
+> unconfirmed are listed under [Verification status](#verification-status).
 
 mshbox was written as an optional wrapper for a terminal AI agent (`mshlite`) that runs shell commands
 written by an LLM **on the user's own machine**. The goal is **damage control**: stop a mistaken or
@@ -18,13 +17,19 @@ It is **not** a boundary against deliberate malware.
 ## Quick start
 
 ```bat
-python mshbox.py selftest
-python mshbox.py run --rw C:\work\proj --ro C:\Python311 -- cmd.exe /c C:\work\proj\build.bat
-python mshbox.py run --rw C:\work\proj --ro C:\Python311 --net --timeout 60 -- python tool.py
-python mshbox.py cleanup
+py mshbox.py selftest
+
+:: batch file: relative name + call, with --cwd set to the folder that holds it
+py mshbox.py run --rw C:\work\proj --cwd C:\work\proj -- cmd.exe /d /c call build.bat
+
+:: Python: use a copy of the interpreter in a folder you own (see "Install location matters")
+py mshbox.py run --rw C:\work\proj --ro C:\work\py --net --timeout 60 -- C:\work\py\python.exe tool.py
+
+py mshbox.py cleanup
 ```
 
-Requires Windows 8+ (AppContainer) and Python 3.8+. The repo is a single file, `mshbox.py`; copy it anywhere.
+Requires Windows 8+ (AppContainer) and Python 3.8+. The program is a single file, `mshbox.py`; copy it anywhere.
+No administrator rights are needed for any command.
 
 ## What it protects
 
@@ -44,6 +49,7 @@ Requires Windows 8+ (AppContainer) and Python 3.8+. The repo is a single file, `
 * **It is not a security boundary against malware or a determined attacker.** No claim is made against kernel exploits, administrator-level attackers, or bugs in Windows itself.
 * **Surrogate-process escapes are not claimed to be covered** (asking an unsandboxed service, COM/RPC server, scheduler, or the host agent itself to act on the sandbox's behalf).
 * **Install location matters.** The program (and the interpreter it needs) must be readable by the container. System folders such as `C:\Windows` already are. A per-user install in a folder you own works, because the grant is inherited. An **all-users install elsewhere** (for example `D:\Python314`, whose files are owned by Administrators with inheritance blocked) cannot be shared with an AppContainer without admin rights: the program dies at startup with `0xC0000022`. Run a **copy** of the program from a folder you own and pass that folder with `--ro`.
+* **A Python copy helper exists.** `mshbox.copy_runtime(dst)` copies a minimal CPython runtime (about 600 files, 10-15 s) into a folder you own and returns the new `python.exe`. `selftest` uses it, and `run` prints a hint when a program dies with `0xC0000022`.
 * **`cmd.exe` quirks.** An AppContainer cannot read the drive root or the parent folders of your workspace. `cmd.exe` touches them for `dir` and when asked to run a batch file by absolute path, and then prints "Access is denied." Run batch files with a relative name and `call` (`cmd /d /c call build.bat` with `--cwd` set to the folder holding it) and prefer other tools for listings.
 * **Localhost is blocked, even with `--net`.** Loopback exemptions need administrator rights, so mshbox does not attempt them. Local dev servers, `localhost` databases and anything that talks to `127.0.0.1` will not work.
 * **Reads of world-readable system locations** (for example `C:\Windows`, `C:\Program Files`, which carry a read ACE for *ALL APPLICATION PACKAGES*) are possible and are intentionally not granted or blocked by mshbox. Whether *other* world-readable folders (for example under `C:\ProgramData` or a folder you created at a drive root) are readable depends on their ACLs and is **unverified**.
@@ -100,8 +106,8 @@ mshbox --version
 ```python
 import mshbox
 
-p = mshbox.run(["cmd.exe", "/c", r"C:\work\proj\build.bat"], r"C:\work\proj",
-               rw=[r"C:\work\proj"], ro=[r"C:\Python311"], net=False, timeout=120)
+p = mshbox.run(["cmd.exe", "/d", "/c", "call", "build.bat"], r"C:\work\proj",
+               rw=[r"C:\work\proj"], net=False, timeout=120)
 for line in p.stdout:          # binary pipe (stderr merged unless merge_stderr=False)
     ...
 code = p.wait()                # 124 on timeout; p.kill(), p.poll(), p.returncode, p.timed_out
@@ -112,15 +118,15 @@ Extra keyword arguments: `mem_mb`, `procs`, `env`, `merge_stderr`.
 
 ## Self-test
 
-Run it on a real Windows machine **before trusting anything else**:
+Run it on your own Windows machine **before trusting anything else**:
 
 ```bat
-python mshbox.py selftest
-python -m unittest tests.test_windows_integration -v
-python -m unittest discover -s tests -v
+py mshbox.py selftest
+py -m unittest tests.test_windows_integration -v
+py -m unittest discover -s tests -v
 ```
 
-`selftest` builds a temp workspace under `%TEMP%\mshbox_selftest_*` (it never touches real user files) and prints PASS / FAIL / SKIP for:
+`selftest` builds a temp workspace under `%TEMP%\mshbox_selftest_*` (it never touches real user files), copies a private Python runtime into it (first run only, 10-15 s) and prints PASS / FAIL / SKIP for:
 
 1. write inside `--rw` succeeds
 2. write outside `--rw` fails (your profile folder, a drive-root file, and a sibling temp folder)
@@ -139,7 +145,7 @@ Notes on reading the results: check 2's drive-root target is weak on its own (or
 * **TLS stacks.** Tools that use Schannel / the Windows certificate store (`curl.exe`, some git builds, .NET) may need additional `--ro` paths or may fail; this is unverified.
 * **Localhost is blocked** (see above).
 * **No console.** The child gets pipes, not a console: progress bars, colour detection, `input()` and anything interactive behave differently. stdin is `NUL`.
-* **Environment is filtered.** `USERPROFILE`, `HOME`, `APPDATA` and all API keys are dropped; pass what a tool really needs with `--env`. `TEMP` / `TMP` point to the container's own temp folder.
+* **Environment is filtered.** `USERPROFILE`, `HOME`, `APPDATA` and all API keys are dropped; pass what a tool really needs with `--env`. `TEMP` / `TMP` point to the container's own temp folder. `LOCALAPPDATA` is always set to the container's own folder (never your real profile): Windows 11 refuses to start a process in an AppContainer without it (error `0xCB`).
 * **ACL cost.** Granting and revoking inheriting ACEs on a big tree (`node_modules`, large repos) can take a long time. Grant the smallest folder that works.
 * **Protected or non-inheriting children.** Files/folders whose DACL has inheritance disabled will not receive the grant, so the command gets *Access denied* on them.
 * **Not NTFS.** FAT/exFAT and some network shares have no ACLs; granting fails, so mshbox fails closed.
@@ -147,22 +153,25 @@ Notes on reading the results: check 2's drive-root target is weak on its own (or
 * **Crash recovery** runs automatically at the start of every `run` and via `mshbox cleanup`. It only repairs runs whose owner PID (checked together with its creation time, to survive PID reuse) is gone.
 * **Journal location** is `%LOCALAPPDATA%\mshbox\journal` (override with `MSHBOX_HOME`). If you delete it before cleanup, orphan ACEs for a dead container SID can remain; they grant nothing to anyone, but they are visible in the folder's Security tab.
 
-## Needs verification on real Windows
+## Verification status
 
-Everything below was written from documentation, not from a running Windows machine. Each item is also tagged `# VERIFY:` in `mshbox.py` where applicable.
+**Confirmed on one machine** (Windows 11, build 26200, Python 3.14, non-admin user) by `selftest` 7/7:
+a container can be created and torn down; writes work inside `--rw` and fail outside it; a decoy secret is unreadable; the network is blocked by default and works with `--net`; a grandchild process is killed on timeout; ACEs, profile and journal are gone afterwards; a broken setup exits 125 without running the command. In the same runs, console programs (`cmd.exe`, a private `python.exe`) start with pipes and `CREATE_NO_WINDOW`, and `AssignProcessToJobObject` works on the suspended container process.
 
-1. `SetNamedSecurityInfoW` propagation: that granting adds an inherited ACE to existing children, that revoking (`REVOKE_ACCESS`) also removes the inherited copies on files the sandbox created, and that the `PROTECTED` / `UNPROTECTED_DACL_SECURITY_INFORMATION` flag handling keeps each object's inheritance state unchanged.
-2. `CreateProcessW` with `CREATE_NO_WINDOW` + redirected pipes + `STARTF_USESTDHANDLES` + an explicit handle list actually starts console programs (`cmd.exe`, `python.exe`) in an AppContainer.
-3. Python starting inside the container with only `--ro <prefix>`: which extra paths/DLLs it needs.
-4. `INTERNET_CLIENT_SID = S-1-15-3-1` is the `internetClient` capability SID.
-5. Layout of `TRUSTEE_W` / `EXPLICIT_ACCESS_W` in the ctypes structs on 32- and 64-bit Python.
-6. `GetAppContainerFolderPath` is exported by `userenv.dll` with signature `(PCWSTR sid, PWSTR *path)`.
-7. The container temp path `<folder>\AC\Temp`, and that it exists or can be created.
-8. The registry location used by the selftest to check that the profile mapping is gone (`HKCU\...\AppContainer\Mappings\<sid>`). The folder check is the primary signal.
-9. `AssignProcessToJobObject` on a *suspended* AppContainer process, including when the host (for example an IDE or CI runner) is already inside a job (nested jobs need Windows 8+).
-10. `DeleteAppContainerProfile` succeeding right after the last process exits (there is a retry loop; the HRESULT values treated as "already gone" are unverified).
-11. `GetProcessTimes` / `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` PID-reuse detection in `cleanup`.
-12. That `Everyone`-only world-readable folders are *not* readable from the container (the claim "secrets stay unreadable" assumes profile folders do not carry ALL APPLICATION PACKAGES ACEs - the default).
+**Still unconfirmed** (written from documentation; most are tagged `# VERIFY:` in `mshbox.py`):
+
+1. Behaviour on Windows 8 / 10 and on other Windows 11 builds.
+2. `SetNamedSecurityInfoW` propagation details: that revoking also removes inherited copies on files the sandbox created, and that each object's inheritance state is left unchanged.
+3. That `INTERNET_CLIENT_SID = S-1-15-3-1` is the `internetClient` capability on every build (it worked on the test machine).
+4. Layout of the `TRUSTEE_W` / `EXPLICIT_ACCESS_W` ctypes structs on 32-bit Python.
+5. The registry location the selftest uses for the profile-mapping check (the folder check is the primary signal).
+6. Nested jobs when the host (an IDE, a CI runner) is already inside a job.
+7. The HRESULT values treated as "profile already gone" in the delete-retry loop.
+8. PID-reuse detection in `cleanup` after a real crash.
+9. That world-readable folders carrying only an `Everyone` ACE are *not* readable from the container (the "secrets stay unreadable" claim assumes profile folders carry no ALL APPLICATION PACKAGES ACE, the default).
+10. Tools beyond Python and `cmd.exe` (git, Node, `curl.exe`, .NET, package managers).
+
+If you hit a case that is not covered here, please report the Windows build, the exact command and the output.
 
 ## Comparison with other tools
 
@@ -176,19 +185,19 @@ If you can accept a one-time elevated setup, or need broad tool compatibility, t
 
 ## Integration with mshlite
 
-A host that already spawns `cmd.exe /c script.bat` only needs to prepend the wrapper:
+A host that already spawns `cmd.exe /c script.bat` prepends the wrapper and switches to a relative `call` (an absolute batch path fails inside the container):
 
 ```python
 import subprocess, sys
 
-cmd = [sys.executable, "mshbox.py", "run", "--rw", PROJECT, "--ro", PYTHON_DIR,
-       "--timeout", "120", "--", "cmd.exe", "/c", BAT_FILE]
+cmd = [sys.executable, "mshbox.py", "run", "--rw", PROJECT, "--cwd", PROJECT,
+       "--timeout", "120", "--", "cmd.exe", "/d", "/c", "call", BAT_NAME]   # relative name, see "cmd.exe quirks"
 proc = subprocess.run(cmd, capture_output=True)
 if proc.returncode == 125:          # sandbox could not be built - the command did NOT run
     ...                             # ask the user; never silently re-run unsandboxed
 ```
 
-Or, without a second Python process: `p = mshbox.run([...], PROJECT, rw=[PROJECT], ro=[PYTHON_DIR])`.
+Or, without a second Python process: `p = mshbox.run([...], PROJECT, rw=[PROJECT])`.
 Treat exit code **125** as "not run" and **124** as "timed out".
 
 ## Tests
@@ -199,7 +208,7 @@ python -m unittest discover -s tests -v
 
 * `tests/test_pure.py` - argument parsing, path normalisation, grant planning, secret-path refusal, command-line quoting (round-tripped through a reference `CommandLineToArgvW` parser), environment filtering, journal I/O. Any OS.
 * `tests/test_orchestration.py` - the real startup / teardown / cleanup logic driven by a **fake** Win32 layer: journal written before any change, the command never spawned when any setup step fails, full rollback, idempotent teardown, tamper-resistant cleanup. Any OS. These prove the *logic*, not that Windows behaves like the fake.
-* `tests/test_windows_integration.py` - real AppContainer runs, **skipped off Windows**, not yet run by the author.
+* `tests/test_windows_integration.py` - real AppContainer runs, **skipped off Windows**. Run it on your machine; `selftest` is the authoritative check.
 
 ## License
 
