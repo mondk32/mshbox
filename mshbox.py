@@ -163,6 +163,9 @@ def plan_grants(rw, ro, exe_dir, cwd, home, sysdirs, isdir=os.path.isdir, exists
 def build_env(parent, extra, temp_dir):
     env = {k: v for k, v in parent.items() if k.upper() in SAFE_ENV}
     env["TEMP"] = env["TMP"] = temp_dir               # the container's own writable temp
+    # Windows 11 (build 26200 verified) refuses CreateProcessW into an AppContainer with ERROR_ENVVAR_NOT_FOUND (0xCB)
+    # unless LOCALAPPDATA is present. Point it at the container's own folder (parent of its Temp), never the real profile.
+    env["LOCALAPPDATA"] = ntpath.dirname(temp_dir) or temp_dir
     env.update(extra or {})
     return env
 
@@ -517,7 +520,8 @@ class Win32:
             si.StartupInfo.dwFlags = 0x100             # STARTF_USESTDHANDLES
             si.StartupInfo.hStdInput, si.StartupInfo.hStdOutput, si.StartupInfo.hStdError = std
             si.lpAttributeList = ct.addressof(attrs)
-            pi, cmd, env = T.PROCESS_INFORMATION(), ct.create_unicode_buffer(cmdline), ct.create_string_buffer(envblock, len(envblock) + 2)
+            pi, cmd = T.PROCESS_INFORMATION(), ct.create_unicode_buffer(cmdline)
+            env = None if envblock is None else ct.create_string_buffer(envblock, len(envblock) + 2)   # None only used by envprobe diagnostics
             # EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | CREATE_NO_WINDOW
             flags = 0x80000 | 0x400 | 0x4 | 0x08000000   # VERIFY: console apps run fine with NO_WINDOW + pipes in an AppContainer
             self._ok(f.CreateProcessW(app, cmd, None, None, True, flags, env, cwd, ct.byref(si), ct.byref(pi)),
@@ -781,6 +785,31 @@ def cleanup(journal=None, w=None, log=print):
     return done, skipped, failed
 
 
+_RUNTIME_SKIP = {"test", "tests", "idlelib", "site-packages", "turtledemo", "tkinter", "ensurepip", "lib2to3",
+                 "pydoc_data", "__pycache__", "tcl", "Doc", "include", "libs", "Scripts", "Tools"}
+
+
+def copy_runtime(dst, src=None):
+    """Copy a minimal CPython runtime (exe, DLLs, stdlib) to dst; returns the new python.exe.
+    Why: an all-users install (e.g. D:\\Python314) has files with inheritance-blocked ACLs owned by Administrators; a
+    normal user cannot grant an AppContainer read access to them, so python.exe dies with 0xC0000022 inside the sandbox.
+    A copy inside a folder the user owns inherits the grant."""
+    src = src or sys.base_prefix
+    exe = os.path.join(src, "python.exe")
+    if not os.path.isfile(exe):
+        raise SandboxError("python.exe not found in %s" % src)
+    os.makedirs(dst, exist_ok=True)
+    for dp, dns, fns in os.walk(src):
+        rel = os.path.relpath(dp, src)
+        dns[:] = [d for d in dns if d not in _RUNTIME_SKIP]
+        if rel == ".":
+            fns = [f for f in fns if f.lower().startswith(("python3", "python.", "vcruntime", "msvcp"))]
+        os.makedirs(os.path.join(dst, rel), exist_ok=True)
+        for f in fns:
+            shutil.copyfile(os.path.join(dp, f), os.path.join(dst, rel, f))
+    return os.path.join(dst, "python.exe")
+
+
 # =============================== selftest ===============================
 PROBE = '''import sys, socket, subprocess, time
 print("START", flush=True)
@@ -813,7 +842,12 @@ def selftest():
         f.write(secret)
     with open(os.path.join(ws, "probe.py"), "w") as f:
         f.write(PROBE)
-    pyro = sorted({sys.base_prefix, sys.prefix})
+    rt = []
+
+    def pyexe():                                              # private runtime copy inside the workspace (lazy, once)
+        if not rt:
+            rt.append(copy_runtime(os.path.join(ws, "py")))
+        return rt[0]
     procs, results = [], []
 
     def sandbox(argv, **kw):
@@ -827,7 +861,8 @@ def selftest():
         path = os.path.join(ws, name)
         with open(path, "w") as f:
             f.write("@echo off\r\n" + body)
-        return ["cmd.exe", "/c", path]
+        return ["cmd.exe", "/d", "/c", "call", name]   # relative + `call`: cmd.exe with an absolute .bat path (or `dir`) touches
+        # the drive root, which an AppContainer cannot access
 
     def verdict(ok, detail=""):
         return ("PASS" if ok else "FAIL"), detail
@@ -862,14 +897,14 @@ def selftest():
             socket.create_connection(("1.1.1.1", 443), 3).close()
         except OSError as e:
             return "SKIP", "host cannot reach 1.1.1.1:443 (offline?): %s" % e
-        _, off = sandbox([sys.executable, "-I", "probe.py", "net"], ro=pyro)
-        _, on = sandbox([sys.executable, "-I", "probe.py", "net"], ro=pyro, net=True)
+        _, off = sandbox([pyexe(), "-I", "probe.py", "net"])
+        _, on = sandbox([pyexe(), "-I", "probe.py", "net"], net=True)
         if "START" not in off or "START" not in on:
-            return verdict(False, "probe python did not start in the sandbox; try more --ro: %r / %r" % (off[:150], on[:150]))
+            return verdict(False, "probe python did not start in the sandbox: %r / %r" % (off[:150], on[:150]))
         return verdict("CONNECTED" not in off and "CONNECTED" in on, "default=%s, --net=%s" % (off.split()[-1:], on.split()[-1:]))
 
     def t5():
-        p = launch([sys.executable, "-I", "probe.py", "spawn"], ws, rw=[ws], ro=pyro, timeout=6)
+        p = launch([pyexe(), "-I", "probe.py", "spawn"], ws, rw=[ws], timeout=6)
         procs.append(p)
         p.stdout.read()
         p.wait()
@@ -1009,6 +1044,10 @@ def cmd_run(ns, command):
     if p.timed_out:
         sys.stderr.write("mshbox: timed out after %ss, process tree killed\n" % ns.timeout)
         return EXIT_TIMEOUT
+    if p.returncode == 0xC0000022:                     # STATUS_ACCESS_DENIED while the image loaded
+        sys.stderr.write("mshbox: hint: the program could not read its own files inside the sandbox. All-users installs "
+                         "(e.g. a Python under D:\\Python314) cannot be shared with an AppContainer without admin rights; "
+                         "run a copy of the program that lives in a folder you own and pass that folder with --ro/--rw.\n")
     return p.returncode
 
 

@@ -199,6 +199,10 @@ class EnvTests(unittest.TestCase):
         for k in ("API_KEY", "AWS_SECRET_ACCESS_KEY", "USERPROFILE"):
             self.assertNotIn(k, env)
 
+    def test_build_env_sets_container_localappdata(self):
+        env = mshbox.build_env({"PATH": "a", "LOCALAPPDATA": "C:\\Users\\me\\AppData\\Local"}, {}, "C:\\ac\\AC\\Temp")
+        self.assertEqual(env["LOCALAPPDATA"], "C:\\ac\\AC")   # required by Windows 11 (0xCB otherwise); never the real profile
+
     def test_explicit_env_overrides(self):
         env = mshbox.build_env({"PATH": "a"}, {"PATH": "b"}, "t")
         self.assertEqual(env["PATH"], "b")
@@ -389,6 +393,30 @@ class NonWindowsTests(unittest.TestCase):
     def test_win32_refuses_off_windows(self):
         with self.assertRaises(mshbox.SandboxError):
             mshbox.Win32()
+
+
+class CopyRuntimeTests(unittest.TestCase):
+    def test_copies_exe_dlls_and_stdlib_but_not_tests(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as root:
+            src, dst = os.path.join(root, "src"), os.path.join(root, "dst")
+            for rel in ("python.exe", "python314.dll", "vcruntime140.dll", "unrelated.exe", "Lib/os.py", "Lib/test/big.py",
+                        "Lib/site-packages/x.py", "DLLs/_socket.pyd", "Doc/x.html"):
+                path = os.path.join(src, *rel.split("/"))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, "w").write("x")
+            exe = mshbox.copy_runtime(dst, src)
+            self.assertEqual(exe, os.path.join(dst, "python.exe"))
+            for rel in ("python314.dll", "vcruntime140.dll", "Lib/os.py", "DLLs/_socket.pyd"):
+                self.assertTrue(os.path.isfile(os.path.join(dst, *rel.split("/"))), rel)
+            for rel in ("unrelated.exe", "Lib/test/big.py", "Lib/site-packages/x.py", "Doc/x.html"):
+                self.assertFalse(os.path.exists(os.path.join(dst, *rel.split("/"))), rel)
+
+    def test_missing_exe_is_a_setup_error(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(mshbox.SandboxError):
+                mshbox.copy_runtime(d + "/dst", d)
 
 
 if __name__ == "__main__":
